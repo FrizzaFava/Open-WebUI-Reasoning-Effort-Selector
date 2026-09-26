@@ -1,10 +1,12 @@
 #### DISCLAIMER: this project was created with the assistance of an LLM. Although major parts of the code was generated, it was entirely reviewed and tested by a human. Also this project wouldn't exist without the contribution of CryptoSharon, please see the credits section.
 ---
-# Open WebUI — Reasoning Effort Selector
+# Reasoning Effort Selector for Open WebUI
 
 **A patch for [Open WebUI](https://github.com/open-webui/open-webui) that adds a ChatGPT-style *reasoning effort* selector, integrated natively into the application with a simple file mount, or client side as a browser extension**
 
 > The same script can be deployed in two ways: as a **native patch** mounted into the container (recommended: works on every device, phone included, with nothing to install client-side) or as a **userscript** via Violentmonkey. Jump straight to [Installation](#installation).
+
+![Demo gif](assets/demo.gif)
 
 ## Table of contents
 
