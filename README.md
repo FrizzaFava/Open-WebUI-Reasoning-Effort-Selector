@@ -21,10 +21,32 @@
 6. [Credits](#credits)
 7. [License](#license)
 
-## TODO:
-- [ ] support user-defined custom reasoning levels
-- [ ] support different providers parameters (e.g. `reasoning: { effort: ... }` for OpenAI Responses, `output_config: { effort: ... }` for Claude etc.)
-- [ ] support for user-defined parameters
+<details>
+<summary><strong>TODO</strong></summary>
+
+- [ ] **Support user-defined/custom reasoning levels**
+  - Keep `none / minimal / low / medium / high / xhigh / max` as the built-in canonical ladder, but allow arbitrary provider/model-specific values.
+  - Support custom labels and explicit ordering for unknown levels.
+  - Remove the current canonical-level restriction from registry entries, model metadata, public-database detection, learned efforts, and multi-model capability resolution.
+
+- [ ] **Support provider/protocol-specific reasoning parameters**
+  - Add payload adapters for different APIs and protocols, e.g. `reasoning_effort`, `reasoning.effort`, `output_config.effort`, Ollama `think`, etc.
+  - Support nested parameters, boolean controls, aliases/value translation, and numeric reasoning budgets where required.
+  - Keep effort selection separate from the way the selected value is serialized into the request.
+
+- [ ] **Support user-defined per-model parameter mappings**
+  - Allow registry entries to define how each UI option maps to the outgoing request instead of requiring built-in knowledge of every provider.
+  - Allow a selection to set one or more arbitrary parameters / nested JSON values.
+  - Preserve the current simple `efforts: [...]` registry format for backward compatibility.
+
+- [ ] **Generalize capability detection for custom values**
+  - Learn arbitrary supported values from backend/model metadata where possible instead of recognizing only the built-in effort names.
+  - Define fallback behavior when a provider exposes values that have no known canonical ordering.
+
+- [ ] **Add tests for registry parsing and request payload mapping**
+  - Cover canonical and custom levels, nested parameters, numeric/boolean values, Default/reset behavior, Ollama mappings, and multi-model selections.
+</details>
+
 ---
 
 <a id="what-is-it"></a>
