@@ -1,4 +1,4 @@
-#### DISCLAIMER: this project was created with the assistance of an LLM. Although major parts of the code was generated, it was entirely reviewed and tested by a human. Also this project wouldn't exist without the contribution of CryptoSharon, please see the credits section.
+#### DISCLAIMER: this project was created with the assistance of an LLM. Although major parts of the code was generated, it was entirely reviewed and tested by a human. Also this project wouldn't exist without the contribution of CryptoSharon, please see the credits section for more info.
 ---
 # Reasoning Effort Selector for Open WebUI
 
@@ -35,8 +35,8 @@ Repository contents:
 
 | File | Role |
 |---|---|
-| `openwebui-reasoning-effort.user.js` | The widget script (identical for both install methods) |
-| `main.py` | Optional **`re-registry`** function for Open WebUI (per-model registry) |
+| [openwebui-reasoning-effort.user.js](openwebui-reasoning-effort.user.js) | The widget script (identical for both install methods) |
+| [main.py](main.py) | Optional **`re-registry`** function for Open WebUI (per-model registry) |
 
 ---
 
@@ -67,7 +67,7 @@ Repository contents:
 <a id="method-a"></a>
 ### Method A - native patch (Docker mount)
 
-1. Copy the contents of `openwebui-reasoning-effort.user.js` to a persistent path reachable by your deployment
+1. Copy the contents of [openwebui-reasoning-effort.user.js](openwebui-reasoning-effort.user.js) to a persistent path reachable by your deployment
 2. Add a bind mount to the container configuration:
    - `<your-path>/openwebui-reasoning-effort.user.js:/app/build/static/loader.js:ro`
 4. Recreate the stack
@@ -79,7 +79,7 @@ Repository contents:
 Useful if you cannot (or prefer not to) touch the container configuration, or for quick testing. Applies only to the browser you install it in.
 
 1. Install a userscript manager: [Violentmonkey](https://violentmonkey.github.io/), [Tampermonkey](https://www.tampermonkey.net/) or [Greasemonkey](https://greasespot.net/).
-2. Open the manager → **Create a new script** → paste the entire contents of `openwebui-reasoning-effort.user.js` over the template → save.
+2. Open the manager → **Create a new script** → paste the entire contents of [openwebui-reasoning-effort.user.js](openwebui-reasoning-effort.user.js) over the template → save.
 3. Open Open WebUI: the widget appears in the input bar (desktop) and in the top navbar (mobile).
 
 <a id="re-registry"></a>
@@ -88,7 +88,7 @@ Useful if you cannot (or prefer not to) touch the container configuration, or fo
 Although the script works fine **without** this component (it relies on the automatic detections), it is HIGHLY RECOMMENDED to install this small pipe: a small fake "model" that only answers the script's automatic registry ping with your own JSON registry of models.
 
 1. In Open WebUI: **Admin Panel → Functions** → **+ Create a Function**.
-2. Paste the entire contents of `main.py` into the editor.
+2. Paste the entire contents of [main.py](main.py) into the editor.
 3. Set an **ID that contains `re-registry`** (e.g. `re_registry`).
 4. Save and enable the function with the **Active** toggle. It appears in the model list as "re-registry …": **don't select it in a chat**, it is not a real model and you can even hide it in the models list if you want.
 5. Open the **Valves** (⚙️ on the function row) and fill the `registry` field: a JSON object mapping the **exact model ids** (as shown in *Admin Panel → Settings → Models*) to their capabilities:
