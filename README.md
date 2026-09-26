@@ -21,6 +21,10 @@
 6. [Credits](#credits)
 7. [License](#license)
 
+## TODO:
+- [ ] support user-defined custom reasoning levels
+- [ ] support different providers parameters (e.g. `reasoning: { effort: ... }` for OpenAI Responses, `output_config: { effort: ... }` for Claude etc.)
+- [ ] support for user-defined parameters
 ---
 
 <a id="what-is-it"></a>
