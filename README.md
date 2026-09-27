@@ -293,6 +293,36 @@ These two objects show the main ways to configure the selector together. Paste e
 
 The example fields and values illustrate the configuration format; they do not establish that a real provider accepts them. A model omitted from **models** can still inherit a uniquely matched connection rule, but its levels remain inferred. An exact model entry can also use a plain effort array for older configurations; add a provider or `parameter` when you want its request format confirmed.
 
+### Simpler full config
+
+You don't have to use lots of options, the most common configuration is going to be something like the following and it's very easy.
+```json
+{
+  "lm-studio": {
+    "connection": { "type": "openai", "index": 0 },
+    "thinking": true,
+    "levels": true,
+    "parameter": "reasoning_effort"
+  }
+}
+```
+
+```json
+{
+  "qwen3.8-27b": {
+    "provider": "lm-studio",
+    "efforts": ["none", "low", "medium", "xhigh"]
+  },
+  "qwen3.5-9b": {
+    "provider": "lm-studio",
+    "levels": false,
+    "mappings": {
+      "off": { "reasoning_effort": "none" },
+      "on": {}
+    }
+}
+```
+
 ### Major provider reasoning parameters
 
 <details>
