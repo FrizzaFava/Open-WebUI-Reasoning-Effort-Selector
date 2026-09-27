@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Open WebUI — Reasoning Effort selector (v2)
 // @namespace    https://github.com/FrizzaFava/Open-WebUI-Reasoning-Effort-Selector
-// @version      2.1.0
-// @description  Per-model reasoning effort selector for Open WebUI: adds a ChatGPT-style level widget to the input bar (desktop pill + mobile navbar trigger), auto-detects capabilities (valve registry pipe, Ollama /api/show, learned efforts, model metadata, public effort database) and injects think / params.reasoning_effort into chat requests.
+// @version      2.6.1
+// @description  Per-model reasoning effort selector for Open WebUI with custom levels and registry-defined provider request mappings.
 // @author       FrizzaFava (original from CryptoSharon)
 // @match        *://*/*
 // @grant        none
@@ -21,10 +21,19 @@
 	const STORAGE_KEY = 'openwebui.reasoningEffortByModel';
 	const LEARNED_STORAGE_KEY = 'openwebui.reasoningEffortsLearnedByModel';
 	const ALL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-	const KNOWN_EFFORT_TOKENS = new Set(ALL_EFFORTS);
 	const PUBLICDB_STORAGE_KEY = 'openwebui.reasoningEffortsPublicDb.v1';
 	const PUBLICDB_TTL_MS = 24 * 60 * 60 * 1000;
 	const PUBLICDB_URL = 'https://openrouter.ai/api/v1/models';
+	const reportError = (context, error) => console.error(`[Reasoning Effort Selector] ${context}`, error);
+	const orderedEfforts = (values) => {
+		const tokens = normalizeTokens(values);
+		const positions = tokens.map((token) => ALL_EFFORTS.indexOf(token));
+		if (positions.every((position) => position >= 0) &&
+			positions.every((position, index) => index === 0 || position < positions[index - 1])) {
+			return tokens.reverse();
+		}
+		return tokens;
+	};
 	const normalizeKey = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 	const EFFORT_LABELS = {
 		'': 'Default', none: 'None', minimal: 'Minimal', low: 'Low',
@@ -52,6 +61,7 @@
 
 	const state = {
 		models: new Map(),
+		modelNames: new Map(),
 		control: null,
 		btn: null,
 		iconEl: null,
@@ -60,6 +70,7 @@
 		popEffort: null,
 		popHeading: null,
 		popBody: null,
+		popNotice: null,
 		popReset: null,
 		popHead: null,
 		listView: false,
@@ -73,11 +84,15 @@
 		levels: null,
 		mobile: { control: null, btn: null, iconEl: null, badge: null },
 		registry: null,
+		registryRules: new WeakMap(),
 		registryTried: false,
 		ollamaInfo: new Map(),
 		ollamaInfoTried: new Set(),
 		publicDb: null,
 		publicDbTried: false,
+		ambiguousProviders: new Set(),
+		selections: null,
+		learnedEfforts: null,
 		renderQueued: false
 	};
 
@@ -103,8 +118,10 @@
 .dark #re2-btn:hover{background:rgba(255,255,255,.07)}
 #re2-btn.re2-warn{color:rgb(217,119,6);border-color:rgba(252,211,77,.45)}
 .dark #re2-btn.re2-warn{color:rgb(251,191,36);border-color:rgba(245,158,11,.35)}
-#re2-btn.re2-warn:hover{background:rgba(251,191,36,.08)}
-.dark #re2-btn.re2-warn:hover{background:rgba(251,191,36,.1)}
+#re2-btn.re2-warn:not(.re2-active):hover{background:rgba(251,191,36,.08)}
+.dark #re2-btn.re2-warn:not(.re2-active):hover{background:rgba(251,191,36,.1)}
+#re2-btn.re2-active:hover,.dark #re2-btn.re2-active:hover{background:rgba(58,131,247,.08)}
+#re2-btn.re2-warn.re2-active .re2-icon{color:#fbbf24}
 #re2-btn>*{pointer-events:none}
 #re2-btn .re2-icon{display:flex;align-items:center;flex-shrink:0}
 #re2-btn .re2-chevron{display:flex;align-items:center;opacity:.45;flex-shrink:0;transition:transform .15s}
@@ -138,6 +155,7 @@
 .dark #re2-mobile-btn.re2-warn{color:rgb(251,191,36)}
 #re2-mobile-btn.re2-has-effort{color:#3a83f7}
 .dark #re2-mobile-btn.re2-has-effort{color:#3a83f7}
+#re2-mobile-btn.re2-warn.re2-has-effort>span:first-child{color:#fbbf24}
 
 #re2-mobile-badge{
   position:absolute;bottom:2px;right:0;
@@ -150,15 +168,16 @@
   transform:scale(0);transition:transform .15s ease;
 }
 #re2-mobile-badge.re2-visible{transform:scale(1)}
-#re2-mobile-btn.re2-warn #re2-mobile-badge{background:rgb(234,179,8);color:rgb(55,65,81)}
+#re2-mobile-btn.re2-warn:not(.re2-has-effort) #re2-mobile-badge{background:rgb(234,179,8);color:rgb(55,65,81)}
 
 #re2-pop{
-  position:fixed;width:auto;z-index:10000;display:none;
+  position:fixed;width:284px;max-width:calc(100vw - 16px);box-sizing:border-box;z-index:10000;display:none;
   border-radius:16px;background:rgba(50,50,50,.92);
   -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
   box-shadow:0 0 0 .5px rgba(255,255,255,.15),0 8px 16px -4px rgba(0,0,0,.35);
   font-family:inherit;color:#ededed;
 }
+#re2-pop[data-mode="toggle"]{width:184px}
 #re2-pop.re2-open{display:block;animation:re2-pop-enter .32s cubic-bezier(.23,1,.32,1) .03s both}
 #re2-btn,#re2-pop,#re2-mobile-btn{-webkit-user-select:none;user-select:none}
 #re2-pop[data-side="top"]{transform-origin:50% 100%}
@@ -193,10 +212,12 @@
 #re2-pop .re2-listitem:hover{background:rgba(255,255,255,.08)}
 #re2-pop .re2-listitem .re2-lchk{margin-left:auto;width:14px;display:flex;align-items:center;color:#ededed}
 #re2-pop .re2-listitem .re2-wicon{display:flex;align-items:center;color:#fbbf24}
-#re2-pop .re2-body{padding:4px 12px 12px}
-#re2-pop .re2-body[data-mode="slider"]{width:260px}
-#re2-pop .re2-body[data-mode="list"]{width:260px}
-#re2-pop .re2-body[data-mode="toggle"]{width:160px}
+#re2-pop .re2-notice{display:none;box-sizing:border-box;max-width:calc(100% - 24px);min-width:0;
+  margin:8px 12px 12px;padding:7px 9px;border-radius:8px;color:#a16207;
+  background:rgba(234,179,8,.10);font-size:11px;line-height:1.35;
+  white-space:normal;overflow-wrap:anywhere}
+#re2-pop .re2-notice[data-kind="info"]{color:#93c5fd;background:rgba(59,130,246,.10)}
+#re2-pop .re2-body{width:100%;box-sizing:border-box;padding:4px 12px 12px}
 #re2-pop .re2-slider{
   position:relative;height:28px;touch-action:none;outline:none;cursor:pointer;
   /* Hover growth knobs: tweak these values to control how much the slider
@@ -265,25 +286,30 @@
 
 	// ── Per-model selections & learned efforts (localStorage) ──
 
-	const readSelections = () => {
+	const readStoredObject = (key, label) => {
 		try {
-			return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
-		} catch {
+			const value = JSON.parse(localStorage.getItem(key) ?? '{}');
+			return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+		} catch (error) {
+			reportError(`Unable to read ${label}`, error);
 			return {};
 		}
 	};
+	const readSelections = () => {
+		if (state.selections) return state.selections;
+		state.selections = readStoredObject(STORAGE_KEY, 'saved selections');
+		return state.selections;
+	};
 
 	const readLearnedEfforts = () => {
-		try {
-			return JSON.parse(localStorage.getItem(LEARNED_STORAGE_KEY) ?? '{}');
-		} catch {
-			return {};
-		}
+		if (state.learnedEfforts) return state.learnedEfforts;
+		state.learnedEfforts = readStoredObject(LEARNED_STORAGE_KEY, 'learned efforts');
+		return state.learnedEfforts;
 	};
 
 	const writeLearnedEfforts = (modelId, efforts) => {
 		const learned = readLearnedEfforts();
-		learned[modelId] = ALL_EFFORTS.filter((effort) => efforts.includes(effort));
+		learned[modelId] = normalizeTokens(efforts);
 		localStorage.setItem(LEARNED_STORAGE_KEY, JSON.stringify(learned));
 		queueRender();
 	};
@@ -302,37 +328,86 @@
 
 	// ── Valve registry (Open WebUI "re-registry" pipe) ──
 
-	const normalizeEffortToken = (value) =>
-		String(value ?? '')
-			.trim()
-			.toLowerCase()
-			.replace(/[^a-z]/g, '');
-
-	const normalizeTokens = (values) =>
-		[...new Set((Array.isArray(values) ? values : []).map(normalizeEffortToken))].filter((token) =>
-			KNOWN_EFFORT_TOKENS.has(token)
+	const safeKey = (key) => !['__proto__', 'prototype', 'constructor'].includes(key);
+	const effortValue = (value) => {
+		if (typeof value === 'number' && Number.isFinite(value)) value = String(value);
+		if (typeof value !== 'string') return '';
+		const token = value.trim();
+		return token.length <= 80 ? token : '';
+	};
+	const normalizeTokens = (values) => [...new Set(
+		(Array.isArray(values) ? values : []).map((item) => effortValue(
+			typeof item === 'string' || typeof item === 'number' ? item : item?.value
+		))
+	)].filter(Boolean);
+	const effortLabels = (values) => {
+		const labels = Object.create(null);
+		for (const item of Array.isArray(values) ? values : []) {
+			const value = effortValue(item?.value);
+			if (value && typeof item?.label === 'string') labels[value] = item.label.slice(0, 80);
+		}
+		return labels;
+	};
+	const validJsonValue = (value) => value === null || typeof value === 'string' ||
+		typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean' ||
+		Array.isArray(value) && value.every(validJsonValue) || validJsonObject(value);
+	const plainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+	const validJsonObject = (value) => plainObject(value) && Object.entries(value).every(([key, child]) =>
+			safeKey(key) && validJsonValue(child)
 		);
+	const normalizeMappings = (value) => {
+		const mappings = Object.create(null);
+		if (!value || typeof value !== 'object' || Array.isArray(value)) return mappings;
+		for (const [level, fields] of Object.entries(value)) {
+			const token = effortValue(level);
+			if (token && safeKey(token) && validJsonObject(fields)) mappings[token] = fields;
+		}
+		return mappings;
+	};
+	const normalizeParameter = (value) => typeof value === 'string' &&
+		value.split('.').every((part) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(part) && safeKey(part)) &&
+		value.length <= 120 ? value : null;
 
-	const rememberRegistry = (data) => {
-		if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
-		const entries = {};
+	const registryEntries = (data) => {
+		if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+		const entries = Object.create(null);
 		for (const [key, value] of Object.entries(data)) {
-			const id = String(key ?? '').trim();
-			if (!id) continue;
-			if (Array.isArray(value)) {
-				// Legacy shorthand: a plain list of levels (thinking + levels assumed).
-				const efforts = normalizeTokens(value);
-				if (efforts.length > 0) entries[id] = { thinking: true, levels: true, efforts };
-			} else if (value && typeof value === 'object') {
-				entries[id] = {
-					thinking: value.thinking !== false,
-					levels: value.levels === true,
-					efforts: normalizeTokens(value.efforts)
-				};
+			if (safeKey(key) && (Array.isArray(value) || value && typeof value === 'object' && !Array.isArray(value))) {
+				entries[key] = value;
 			}
 		}
-		if (Object.keys(entries).length === 0) return false;
-		state.registry = entries;
+		return entries;
+	};
+	const normalizedEntry = (value) => {
+		if (Array.isArray(value)) value = { thinking: true, levels: true, efforts: value };
+		if (!value || typeof value !== 'object') return null;
+		const mappings = normalizeMappings(value.mappings);
+		return {
+			thinking: value.thinking !== false,
+			levels: value.levels === true,
+			efforts: [...new Set([...normalizeTokens(value.efforts),
+				...Object.keys(mappings).filter((level) => level !== 'on' && level !== 'off')])],
+			labels: effortLabels(value.efforts),
+			mappings,
+			parameter: normalizeParameter(value.parameter),
+			valueType: ['string', 'number', 'boolean'].includes(value.value_type) ? value.value_type : 'string'
+		};
+	};
+	const rememberRegistry = (data) => {
+		if (data?.error) throw new Error(`${data.error.valve ?? 'registry'} Valve: ${data.error.message ?? 'invalid JSON'}`);
+		const split = data && (Object.hasOwn(data, 'providers') || Object.hasOwn(data, 'models'));
+		const providers = registryEntries(split ? data.providers ?? {} : {});
+		const models = registryEntries(split ? data.models ?? {} : data);
+		if (!providers || !models) return false;
+		for (const [id, rule] of Object.entries(models)) {
+			if (rule?.provider && !Object.hasOwn(providers, rule.provider)) {
+				throw new Error(`Model ${id} refers to unknown provider ${rule.provider}`);
+			}
+		}
+		state.registry = { providers, models };
+		state.registryRules = new WeakMap();
+		state.ambiguousProviders.clear();
+		queueRender();
 		return true;
 	};
 
@@ -343,16 +418,63 @@
 		return null;
 	};
 
-	const registryEntryFor = (model) => {
-		if (!state.registry || !model) return null;
-		return state.registry[model.id] ?? null;
+	const connectionMatches = (connection, model) => {
+		if (!connection || typeof connection !== 'object') return false;
+		const type = String(model.owned_by ?? '').toLowerCase();
+		if (connection.type !== type || !['openai', 'ollama'].includes(type)) return false;
+		const hasIndex = Number.isSafeInteger(connection.index) && connection.index >= 0;
+		const hasPrefix = typeof connection.prefix === 'string' && connection.prefix.length > 0;
+		if (!hasIndex && !hasPrefix) return false;
+		if (hasPrefix && !String(model.id).startsWith(`${connection.prefix}.`)) return false;
+		if (hasIndex) {
+			const indices = type === 'ollama' ? model.urls : [model.urlIdx];
+			if (!Array.isArray(indices) || !indices.includes(connection.index)) return false;
+		}
+		return true;
 	};
+	const registryResolutionFor = (model) => {
+		if (!state.registry || !model || typeof model !== 'object') return null;
+		if (state.registryRules.has(model)) return state.registryRules.get(model);
+		const modelRule = state.registry.models[model.id];
+		const explicit = typeof modelRule?.provider === 'string' ? modelRule.provider : null;
+		const connectionProfiles = Object.entries(state.registry.providers).filter(([, rule]) =>
+			connectionMatches(rule?.connection, model));
+		let connectionProvider = null;
+		if (connectionProfiles.length === 1) connectionProvider = connectionProfiles[0][0];
+		if (connectionProfiles.length > 1 && !state.ambiguousProviders.has(model.id)) {
+			state.ambiguousProviders.add(model.id);
+			reportError(`Several provider profiles match connection for ${model.id}; use an exact model entry`,
+				new Error(connectionProfiles.map(([id]) => id).join(', ')));
+		}
+		const hinted = [model.provider, model.openai?.provider, model.info?.meta?.provider,
+			String(model.owned_by ?? '').toLowerCase() === 'ollama' ? 'ollama' : null];
+		const providerId = explicit ?? (connectionProfiles.length > 1 ? null :
+			connectionProvider ?? hinted.find((name) => typeof name === 'string' &&
+				Object.hasOwn(state.registry.providers, name)));
+		const profile = providerId ? state.registry.providers[providerId] : null;
+		if (!profile && !modelRule) {
+			state.registryRules.set(model, null);
+			return null;
+		}
+		const modelObject = Array.isArray(modelRule) ? { thinking: true, levels: true, efforts: modelRule } : modelRule ?? {};
+		const combined = { ...(profile ?? {}), ...modelObject,
+			mappings: { ...(profile?.mappings ?? {}), ...(modelObject.mappings ?? {}) } };
+		const entry = normalizedEntry(combined);
+		const modelEfforts = normalizedEntry(modelObject)?.efforts ?? [];
+		const resolution = { entry, modelConfigured: Boolean(modelRule), providerConfigured: Boolean(profile), providerId,
+			requestConfigured: Boolean(entry?.parameter || Object.keys(entry?.mappings ?? {}).length),
+			levelsConfigured: Boolean(modelRule) && (modelObject.levels === false || modelEfforts.length > 0),
+			levelsSpecified: Object.hasOwn(combined, 'levels') };
+		state.registryRules.set(model, resolution);
+		return resolution;
+	};
+	const registryEntryFor = (model) => registryResolutionFor(model)?.entry ?? null;
 
 	const loadRegistry = async () => {
 		if (state.registry) return;
-		state.registryTried = true;
 		const registryModelId = findRegistryModelId();
 		if (!registryModelId) return;
+		state.registryTried = true;
 
 		try {
 			const response = await originalFetch('/api/chat/completions', {
@@ -374,10 +496,10 @@
 			const content = payload?.choices?.[0]?.message?.content ?? '';
 			const text = String(content).replace(/^```(?:json)?/i, '').replace(/```\s*$/, '').trim();
 			if (!rememberRegistry(JSON.parse(text))) {
-				throw new Error('response is not a JSON object of effort lists');
+				throw new Error('response is not a valid registry object');
 			}
-		} catch {
-			// Registry unavailable: fall through to the lower-priority sources.
+		} catch (error) {
+			reportError('Unable to load the Valve registry', error);
 		}
 	};
 
@@ -393,8 +515,8 @@
 		try {
 			const cached = JSON.parse(localStorage.getItem(PUBLICDB_STORAGE_KEY) ?? 'null');
 			if (cached && Date.now() - (cached.ts ?? 0) < PUBLICDB_TTL_MS) return cached.efforts ?? null;
-		} catch {
-			// Ignore malformed cache.
+		} catch (error) {
+			reportError('Unable to read the public model cache', error);
 		}
 		return null;
 	};
@@ -402,13 +524,11 @@
 	const rememberPublicDb = (payload) => {
 		const models = payload?.data;
 		if (!Array.isArray(models)) return false;
-		const efforts = {};
+		const efforts = Object.create(null);
 		for (const entry of models) {
 			const raw = entry?.reasoning?.supported_efforts;
 			if (!Array.isArray(raw)) continue;
-			const tokens = [...new Set(raw.map(normalizeEffortToken))].filter((token) =>
-				KNOWN_EFFORT_TOKENS.has(token)
-			);
+			const tokens = orderedEfforts(raw);
 			if (tokens.length === 0) continue;
 			const slug = String(entry?.id ?? '').split('/').pop();
 			for (const key of [entry?.id, slug, entry?.name]) {
@@ -418,10 +538,11 @@
 		}
 		if (Object.keys(efforts).length === 0) return false;
 		state.publicDb = efforts;
+		queueRender();
 		try {
 			localStorage.setItem(PUBLICDB_STORAGE_KEY, JSON.stringify({ ts: Date.now(), efforts }));
-		} catch {
-			// Storage unavailable: keep the in-memory map anyway.
+		} catch (error) {
+			reportError('Unable to save the public model cache', error);
 		}
 		return true;
 	};
@@ -432,14 +553,15 @@
 		const cached = readPublicDbCache();
 		if (cached) {
 			state.publicDb = cached;
+			queueRender();
 			return;
 		}
 		try {
 			const response = await fetch(PUBLICDB_URL, { headers: { Accept: 'application/json' } });
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			rememberPublicDb(await response.json());
-		} catch {
-			// Best effort: an unreachable database simply leaves models unverified.
+		} catch (error) {
+			reportError('Unable to load public model metadata', error);
 		}
 	};
 
@@ -495,7 +617,7 @@
 				state.ollamaInfo.set(model.id, { values, canThink, defaultValue: thinking?.default ?? null });
 				queueRender();
 			})
-			.catch(() => {});
+			.catch((error) => reportError(`Unable to inspect Ollama model ${model.id}`, error));
 	};
 
 	const ollamaThinkFor = (effort, model) => {
@@ -548,11 +670,13 @@
 	// Modes: 'levels' (slider + list), 'think' (On/Off only) and 'none'
 	// (widget hidden). Anything unresolved behaves like an unverified 'levels'
 	// model: Default selected and every option flagged with a warning icon.
-	const verifiedInfo = (verified, hasVerifiedList = true) => ({
+	const verifiedInfo = (verified, hasVerifiedList = true, labels = {}, mappings = {}) => ({
 		show: true,
 		mode: 'levels',
 		verified,
-		efforts: [...ALL_EFFORTS],
+		efforts: [...new Set([...verified, ...ALL_EFFORTS])],
+		labels,
+		mappings,
 		hasVerifiedList
 	});
 
@@ -564,20 +688,8 @@
 		hasVerifiedList: false
 	};
 
-	const effortInfoForModel = (model) => {
+	const inferredInfoForModel = (model) => {
 		if (!model) return null;
-
-		const entry = registryEntryFor(model);
-		if (entry) {
-			if (!entry.thinking) {
-				return { show: false, mode: 'none', verified: [], efforts: [], hasVerifiedList: true };
-			}
-			if (!entry.levels) {
-				// The valve declares thinking support without levels → On/Off control.
-				return { show: true, mode: 'think', verified: ['on', 'off'], efforts: ['on', 'off'], hasVerifiedList: true };
-			}
-			return verifiedInfo(entry.efforts);
-		}
 
 		// Ollama auto-detection via /ollama/api/show.
 		if (String(model.owned_by ?? '').toLowerCase() === 'ollama') {
@@ -612,7 +724,7 @@
 
 		const learned = readLearnedEfforts()[model.id];
 		if (Array.isArray(learned)) {
-			return verifiedInfo(ALL_EFFORTS.filter((effort) => learned.includes(effort)));
+			return verifiedInfo(normalizeTokens(learned));
 		}
 
 		if (model.reasoning && Object.hasOwn(model.reasoning, 'supported_efforts')) {
@@ -621,7 +733,7 @@
 				efforts === null
 					? [...ALL_EFFORTS]
 					: Array.isArray(efforts)
-						? ALL_EFFORTS.filter((effort) => efforts.includes(effort))
+						? orderedEfforts(efforts)
 						: [];
 			return verifiedInfo(
 				model.reasoning.mandatory ? supported.filter((effort) => effort !== 'none') : supported
@@ -634,12 +746,48 @@
 		return UNKNOWN_INFO;
 	};
 
+	const effortInfoForModel = (model) => {
+		if (!model) return null;
+		const inferred = inferredInfoForModel(model);
+		const resolution = registryResolutionFor(model);
+		const entry = resolution?.entry;
+		const confidence = resolution?.modelConfigured ? 'model' : resolution?.providerConfigured ? 'provider' : 'unconfigured';
+		const alert = !resolution?.requestConfigured ? 'warning' : !resolution.levelsConfigured ? 'info' : null;
+		const notice = alert === 'warning'
+			? 'Request parameter is not configured for this model. Set a provider rule or a model parameter in the Valves.'
+			: alert === 'info'
+				? 'Model levels are inferred and not confirmed in the configuration.'
+				: '';
+		if (!entry) return { ...inferred, confidence, alert, notice };
+		if (!entry.thinking) {
+			return { show: false, mode: 'none', verified: [], efforts: [], hasVerifiedList: true, confidence, alert, notice };
+		}
+		const levelsMode = resolution.levelsSpecified ? entry.levels
+			: entry.efforts.length > 0 || inferred.mode !== 'think';
+		if (!levelsMode) {
+			return { show: true, mode: 'think', verified: ['on', 'off'], efforts: ['on', 'off'],
+				mappings: entry.mappings, hasVerifiedList: true, confidence, alert, notice };
+		}
+		const levels = entry.efforts.length ? entry.efforts
+			: inferred.verified.filter((effort) => effort !== 'on' && effort !== 'off');
+		const info = levels.length ? verifiedInfo(levels, true, entry.labels, entry.mappings)
+			: { ...UNKNOWN_INFO, labels: entry.labels, mappings: entry.mappings };
+		return { ...info, confidence, alert, notice };
+	};
+
 	const rememberModels = (payload) => {
 		const models = Array.isArray(payload) ? payload : payload?.data;
 		if (!Array.isArray(models)) return;
 		for (const model of models) {
 			if (model?.id) state.models.set(model.id, model);
 		}
+		state.modelNames.clear();
+		for (const model of state.models.values()) {
+			const label = String(model.name ?? model.id).trim();
+			if (!label) continue;
+			state.modelNames.set(label, state.modelNames.has(label) ? null : model.id);
+		}
+		state.registryRules = new WeakMap();
 		queueRender();
 		ensureRegistry();
 		ensurePublicDb();
@@ -657,15 +805,8 @@
 		}
 		buttons.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 
-		const ids = [];
-		for (const button of buttons) {
-			const label = button.textContent?.trim();
-			if (!label) continue;
-			const matches = [...state.models.values()].filter(
-				(model) => String(model.name ?? model.id).trim() === label
-			);
-			if (matches.length === 1) ids.push(matches[0].id);
-		}
+		const ids = buttons.map((button) => state.modelNames.get(button.textContent?.trim()))
+			.filter((id) => typeof id === 'string');
 
 		if (ids.length > 0) {
 			return [...new Set(ids)];
@@ -679,8 +820,8 @@
 					return valid;
 				}
 			}
-		} catch {
-			// Ignore malformed session state.
+		} catch (error) {
+			reportError('Unable to read selected models from session storage', error);
 		}
 		return [];
 	};
@@ -695,16 +836,24 @@
 		const infos = modelIds.map((id) => effortInfoForModel(state.models.get(id))).filter(Boolean);
 		if (infos.length === 0) return null;
 		const thinkOnly = infos.every((info) => info.mode === 'think');
-		const efforts = thinkOnly ? ['on', 'off'] : [...ALL_EFFORTS];
+		const efforts = thinkOnly ? ['on', 'off'] : [...new Set(infos.flatMap((info) => info.efforts))];
 		const verified = thinkOnly
-			? (infos.every((info) => info.hasVerifiedList) ? ['on', 'off'] : [])
-			: ALL_EFFORTS.filter((effort) => infos.every((info) => info.verified.includes(effort)));
+			? ['on', 'off'].filter((effort) => infos.every((info) => info.verified.includes(effort)))
+			: efforts.filter((effort) => infos.every((info) => info.verified.includes(effort)));
+		const labels = Object.assign(Object.create(null), ...infos.map((info) => info.labels ?? {}));
 		return {
 			show: infos.every((info) => info.show !== false),
 			mode: thinkOnly ? 'think' : 'levels',
 			efforts,
 			verified,
-			hasVerifiedList: infos.every((info) => info.hasVerifiedList === true)
+			labels,
+			hasVerifiedList: infos.every((info) => info.hasVerifiedList === true),
+			confidence: infos.some((info) => info.confidence === 'unconfigured') ? 'unconfigured'
+				: infos.some((info) => info.confidence === 'provider') ? 'provider' : 'model',
+			alert: infos.some((info) => info.alert === 'warning') ? 'warning'
+				: infos.some((info) => info.alert === 'info') ? 'info' : null,
+			notice: infos.find((info) => info.alert === 'warning')?.notice ??
+				infos.find((info) => info.alert === 'info')?.notice ?? ''
 		};
 	};
 
@@ -835,14 +984,16 @@
 	// otherwise the full generic ladder (starting from None) for unknown models.
 	const sliderLevels = (verified) => {
 		const levels = (verified ?? []).filter((effort) => effort !== 'on' && effort !== 'off');
-		levels.sort((a, b) => ALL_EFFORTS.indexOf(a) - ALL_EFFORTS.indexOf(b));
-		if (levels.length < 2) return [...ALL_EFFORTS];
+		if (levels.length < 2) return [...new Set([...ALL_EFFORTS, ...levels])];
 		return levels;
 	};
+	const displayLabel = (info, value) => info.labels?.[value] ?? EFFORT_LABELS[value] ??
+		(value ? value.split(/[-_\s]+/).filter(Boolean).map((part) =>
+			part[0].toUpperCase() + part.slice(1)).join(' ') : 'Default');
 
-	const buildSlider = (levels) => {
+	const buildSlider = (levels, info) => {
 		const body = state.popBody;
-		const signature = levels.join('|');
+		const signature = JSON.stringify(levels.map((level) => [level, displayLabel(info, level)]));
 		if (body.dataset.mode === 'slider' && body.dataset.levels === signature) return;
 		body.dataset.mode = 'slider';
 		body.dataset.levels = signature;
@@ -866,7 +1017,7 @@
 			tick.className = 're2-tick';
 			tick.dataset.i = String(i);
 			tick.style.left = tickLeft(i, levels.length);
-			tick.title = EFFORT_LABELS[levels[i]] ?? levels[i];
+			tick.title = displayLabel(info, levels[i]);
 			ticks.append(tick);
 		}
 		track.append(range, ticks);
@@ -882,7 +1033,7 @@
 		state.thumb = thumb;
 	};
 
-	const updateSlider = (index) => {
+	const updateSlider = (index, info) => {
 		const levels = state.levels;
 		if (!state.slider || !levels?.length) return;
 		const count = levels.length;
@@ -895,7 +1046,7 @@
 			slider.setAttribute('aria-valuetext', 'Default');
 		} else {
 			slider.setAttribute('aria-valuenow', String(index));
-			slider.setAttribute('aria-valuetext', EFFORT_LABELS[levels[index]] ?? levels[index]);
+			slider.setAttribute('aria-valuetext', displayLabel(info, levels[index]));
 		}
 		state.range.style.width = isDefault ? '0px' : tickLeft(index, count);
 		state.thumb.style.left = tickLeft(isDefault ? 0 : index, count);
@@ -906,6 +1057,10 @@
 		}
 	};
 
+	const toggleOnValue = (ids) => ids.some((id) => {
+		const entry = registryEntryFor(state.models.get(id));
+		return Boolean(entry?.mappings?.on || entry?.parameter);
+	}) ? 'on' : '';
 	const buildToggle = () => {
 		const body = state.popBody;
 		if (body.dataset.mode === 'toggle' && state.switchEl?.isConnected) return;
@@ -929,9 +1084,7 @@
 			const selections = readSelections();
 			const ids = selectedModelIds();
 			const current = ids.length === 1 ? (selections[ids[0]] ?? '') : '';
-			// The default for think-only models is ON: toggling back returns to the
-			// no-injection default instead of an explicit 'on' override.
-			writeSelection(ids, current === 'off' ? '' : 'off');
+			writeSelection(ids, current === 'off' ? toggleOnValue(ids) : 'off');
 			render();
 		});
 		row.append(label, switchBtn);
@@ -1028,8 +1181,11 @@
 
 		const body = document.createElement('div');
 		body.className = 're2-body';
+		const notice = document.createElement('div');
+		notice.className = 're2-notice';
+		notice.setAttribute('role', 'status');
 
-		pop.append(head, body);
+		pop.append(head, body, notice);
 		document.body.append(pop);
 		bindPopup(pop);
 
@@ -1047,6 +1203,7 @@
 		state.popEffort = effortEl;
 		state.popHeading = heading;
 		state.popBody = body;
+		state.popNotice = notice;
 		state.popReset = resetBtn;
 		state.popHead = head;
 		return pop;
@@ -1065,7 +1222,7 @@
 	const buildList = (info, selectedValue) => {
 		const body = state.popBody;
 		const verifiedSet = new Set(info.verified ?? []);
-		const signature = `list:${[...(info.efforts ?? [])].join('|')}|${[...verifiedSet].join('|')}`;
+		const signature = JSON.stringify([info.efforts, info.verified, info.labels]);
 		if (body.dataset.mode === 'list' && body.dataset.levels === signature) {
 			updateListSelection(selectedValue);
 			return;
@@ -1089,7 +1246,7 @@
 			item.className = 're2-listitem';
 			item.dataset.value = value;
 			const txt = document.createElement('span');
-			txt.textContent = EFFORT_LABELS[value] ?? value;
+			txt.textContent = displayLabel(info, value);
 			item.append(txt);
 			if (unverified) {
 				const warn = document.createElement('span');
@@ -1117,8 +1274,7 @@
 		ordered.sort((a, b) => {
 			const va = verifiedSet.has(a) ? 0 : 1;
 			const vb = verifiedSet.has(b) ? 0 : 1;
-			if (va !== vb) return va - vb;
-			return ALL_EFFORTS.indexOf(a) - ALL_EFFORTS.indexOf(b);
+			return va - vb;
 		});
 		for (const effort of ordered) {
 			list.append(makeItem(effort, !verifiedSet.has(effort)));
@@ -1130,6 +1286,12 @@
 
 	const updatePopup = (info, verified, selectedValue, modelIds) => {
 		ensurePopup();
+		state.pop.dataset.mode = info.mode === 'think' ? 'toggle' : 'levels';
+		const alert = info.alert;
+		const notice = alert ? info.notice ?? '' : '';
+		if (state.popNotice.textContent !== notice) state.popNotice.textContent = notice;
+		state.popNotice.style.display = alert ? 'block' : 'none';
+		state.popNotice.dataset.kind = alert ?? '';
 		if (info.mode === 'think') {
 			state.popHead.style.display = 'none';
 			state.popHeading.classList.remove('re2-clickable');
@@ -1151,15 +1313,15 @@
 			state.popHead.style.display = '';
 			state.popReset.style.display = '';
 			state.popHeading.classList.add('re2-clickable');
-			const effortLabel = EFFORT_LABELS[selectedValue] ?? (selectedValue || 'Default');
+			const effortLabel = displayLabel(info, selectedValue) || 'Default';
 			if (state.popEffort.textContent !== effortLabel) state.popEffort.textContent = effortLabel;
 			if (state.listView) {
 				buildList(info, selectedValue);
 			} else {
 				const levels = sliderLevels(verified);
-				buildSlider(levels);
+				buildSlider(levels, info);
 				state.levels = levels;
-				updateSlider(levels.indexOf(selectedValue));
+				updateSlider(levels.indexOf(selectedValue), info);
 			}
 		}
 	};
@@ -1291,20 +1453,23 @@
 		const selectedValues = new Set(modelIds.map((id) => selections[id] ?? ''));
 		const selectedValue = selectedValues.size === 1 ? [...selectedValues][0] : '';
 		const selectionUnverified = Boolean(selectedValue) && !verified.includes(selectedValue);
+		const showWarning = selectionUnverified || info.alert === 'warning';
 		const thinkMode = info.mode === 'think';
 
 		// Desktop rendering
 		if (desktopOk && state.btn) {
-			const newTitle = selectionUnverified
-				? 'This effort is not reported for the selected model and may fail. Default sends no override.'
+			const newTitle = info.alert === 'warning'
+				? 'Request parameter is not configured for this model. Set a provider rule or model parameter in the Valves.'
+				: selectionUnverified
+					? 'This effort is not reported for the selected model and may fail. Default sends no override.'
 				: 'Reasoning effort';
 			if (state.btn.title !== newTitle) state.btn.title = newTitle;
 
-			state.btn.classList.toggle('re2-warn', selectionUnverified);
+			state.btn.classList.toggle('re2-warn', showWarning);
 			state.btn.classList.toggle('re2-active', thinkMode ? selectedValue !== 'off' : Boolean(selectedValue) && !selectionUnverified);
-			const newIcon = selectionUnverified ? SVG_WARN : SVG_BOLT;
+			const newIcon = showWarning ? SVG_WARN : SVG_BOLT;
 			if (state.iconEl.innerHTML !== newIcon) state.iconEl.innerHTML = newIcon;
-			const newLabel = thinkMode ? (selectedValue === 'off' ? 'Off' : 'On') : (EFFORT_LABELS[selectedValue] ?? selectedValue);
+			const newLabel = thinkMode ? (selectedValue === 'off' ? 'Off' : 'On') : displayLabel(info, selectedValue);
 			if (state.labelEl.textContent !== newLabel) state.labelEl.textContent = newLabel;
 		}
 
@@ -1312,12 +1477,12 @@
 		if (mobileOk && state.mobile.btn) {
 			const { btn, iconEl, badge } = state.mobile;
 
-			btn.classList.toggle('re2-warn', selectionUnverified);
+			btn.classList.toggle('re2-warn', showWarning);
 			btn.classList.toggle('re2-has-effort', thinkMode ? selectedValue !== 'off' : Boolean(selectedValue) && !selectionUnverified);
-			const newIconMobile = selectionUnverified ? SVG_WARN_NAV : SVG_BOLT_SM;
+			const newIconMobile = showWarning ? SVG_WARN_NAV : SVG_BOLT_SM;
 			if (iconEl.innerHTML !== newIconMobile) iconEl.innerHTML = newIconMobile;
 
-			const shortLabel = thinkMode ? (selectedValue === 'off' ? 'Off' : 'On') : (EFFORT_SHORT[selectedValue] ?? '');
+			const shortLabel = thinkMode ? (selectedValue === 'off' ? 'Off' : 'On') : (EFFORT_SHORT[selectedValue] ?? (selectedValue ? displayLabel(info, selectedValue).slice(0, 3) : ''));
 			if (badge.textContent !== shortLabel) badge.textContent = shortLabel;
 			badge.classList.toggle('re2-visible', Boolean(shortLabel));
 		}
@@ -1343,13 +1508,9 @@
 
 			const candidates = [];
 			const collectEffortTokens = (part) => {
-				const tokens = [
-					...new Set(
-						[...text.matchAll(/\b(none|minimal|low|medium|high|xhigh|max)\b/gi)].map(
-							(match) => match[1].toLowerCase()
-						)
-					)
-				];
+				const quoted = [...part.matchAll(/["'`]([^"'`]+)["'`]/g)].map((match) => match[1]);
+				const tokens = normalizeTokens(quoted.length ? quoted :
+					[...part.matchAll(/\b(none|minimal|low|medium|high|xhigh|max)\b/gi)].map((match) => match[1].toLowerCase()));
 				if (tokens.length > 0) candidates.push(tokens);
 			};
 			// Jinja-style template errors: 'Supported types are xhigh (default), medium, and low.'
@@ -1371,8 +1532,8 @@
 				);
 				writeLearnedEfforts(modelId, learned);
 			}
-		} catch {
-			// Preserve the permissive fallback if an upstream error shape is unfamiliar.
+		} catch (error) {
+			reportError('Unable to parse a provider error response', error);
 		}
 	};
 
@@ -1380,9 +1541,94 @@
 
 	let originalFetch = null;
 	let fetchHookInstalled = false;
+	const mergeFields = (target, fields) => {
+		for (const [key, value] of Object.entries(fields)) {
+			if (!safeKey(key)) continue;
+			if (plainObject(value)) {
+				if (!plainObject(target[key])) target[key] = {};
+				mergeFields(target[key], value);
+			} else {
+				target[key] = value;
+			}
+		}
+	};
+	const parameterMapping = (entry, effort) => {
+		if (!entry?.parameter) return null;
+		let value = effort;
+		if (entry.valueType === 'number') {
+			value = Number(effort);
+			if (!Number.isFinite(value) || effort.trim() === '') return null;
+		} else if (entry.valueType === 'boolean') {
+			if (effort !== 'on' && effort !== 'off') return null;
+			value = effort === 'on';
+		}
+		const fields = {};
+		let cursor = fields;
+		const parts = entry.parameter.split('.');
+		for (const part of parts.slice(0, -1)) cursor = cursor[part] = {};
+		cursor[parts.at(-1)] = value;
+		return fields;
+	};
+	const applySelectionToBody = (body, model, effort, isOllamaChat) => {
+		if (!effort) return false;
+		const isOllama = isOllamaChat || String(model?.owned_by ?? '').toLowerCase() === 'ollama';
+		const entry = registryEntryFor(model);
+		const mapping = entry?.mappings?.[effort] ?? parameterMapping(entry, effort);
+		if (mapping) {
+			if (isOllamaChat) mergeFields(body, mapping);
+			else if (isOllama) {
+				body.options = plainObject(body.options) ? body.options : {};
+				mergeFields(body.options, mapping);
+			}
+			else {
+				body.params = plainObject(body.params) ? body.params : {};
+				delete body.params.reasoning_effort;
+				body.params.custom_params = plainObject(body.params.custom_params) ? body.params.custom_params : {};
+				mergeFields(body.params.custom_params, mapping);
+				if (entry?.valueType !== 'string' &&
+					(typeof mapping.reasoning_effort === 'number' || typeof mapping.reasoning_effort === 'boolean')) {
+					body.reasoning_effort = mapping.reasoning_effort;
+				}
+			}
+			return true;
+		}
+		if (isOllama) {
+			const think = ollamaThinkFor(effort, model);
+			if (think === null) return false;
+			if (isOllamaChat) body.think = think;
+			else {
+				body.options = plainObject(body.options) ? body.options : {};
+				body.options.think = think;
+			}
+			return true;
+		}
+		if (effort === 'off') return false;
+		body.params = plainObject(body.params) ? body.params : {};
+		body.params.reasoning_effort = effort === 'on' ? 'low' : effort;
+		return true;
+	};
 
-	// Installs the fetch hook. Must run in the page world so the app's own
-	// requests hit the patched fetch.
+	const responseExcerpt = async (response, limit) => {
+		const clone = response.clone();
+		const reader = clone.body?.getReader?.();
+		if (!reader) return (await clone.text()).slice(0, limit);
+		const decoder = new TextDecoder();
+		let text = '';
+		let length = 0;
+		try {
+			while (length < limit) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				const bytes = value.subarray(0, limit - length);
+				text += decoder.decode(bytes, { stream: true });
+				length += bytes.length;
+			}
+			return text + decoder.decode();
+		} finally {
+			void reader.cancel().catch(() => {});
+		}
+	};
+
 	const installFetchHook = () => {
 		if (fetchHookInstalled) return;
 		fetchHookInstalled = true;
@@ -1406,71 +1652,44 @@
 					requestModelId = body.model ?? null;
 					const model = state.models.get(body.model);
 					if (model) ensureOllamaInfo(model);
-					const isOllamaTarget =
-						isOllamaChat || String(model?.owned_by ?? '').toLowerCase() === 'ollama';
-					const info = effortInfoForModel(model);
 					const selections = readSelections();
 					const selectedEffort = selections[body.model];
-
-					// The user's explicit choice wins even for models whose supported efforts
-					// are unverified; 'Default' (no selection) never sends an override.
-					if (isOllamaTarget) {
-						// Open WebUI discards params.reasoning_effort for Ollama targets: the
-						// native control is 'think' (boolean, or named levels where supported).
-						if (selectedEffort) {
-							requestEffort = selectedEffort;
-							if (isOllamaChat) {
-								const think = ollamaThinkFor(selectedEffort, model);
-								if (think === null) delete body.think;
-								else body.think = think;
-							} else {
-								body.options = body.options && typeof body.options === 'object' ? body.options : {};
-								const think = ollamaThinkFor(selectedEffort, model);
-								if (think === null) delete body.options.think;
-								else body.options.think = think;
-							}
-						}
-						// 'Default' leaves the app's own think setting untouched.
-					} else if (isChatCompletions) {
-						body.params = body.params && typeof body.params === 'object' ? body.params : {};
-						if (selectedEffort === 'off') {
-							// On/Off control for non-Ollama targets: 'Off' sends no override
-							// (the app default applies), 'On' sends the lowest level.
-							delete body.params.reasoning_effort;
-						} else if (selectedEffort) {
-							body.params.reasoning_effort = selectedEffort === 'on' ? 'low' : selectedEffort;
-							requestEffort = body.params.reasoning_effort;
-						} else {
-							delete body.params.reasoning_effort;
-						}
+					if (selectedEffort && applySelectionToBody(body, model, selectedEffort, isOllamaChat)) {
+						requestEffort = selectedEffort;
 					}
 
 					nextInit = { ...init, body: JSON.stringify(body) };
 				} catch (err) {
-					// Leave non-JSON requests untouched.
+					reportError('Unable to apply the selected effort to a chat request', err);
 				}
 			}
 
-			const response = await originalFetch(input, nextInit);
+			let response;
+			try {
+				response = await originalFetch(input, nextInit);
+			} catch (error) {
+				if (isChatCompletions || isOllamaChat) {
+					reportError(`Chat request failed before a response: model=${requestModelId ?? 'unknown'}`, error);
+				}
+				throw error;
+			}
 			const chatRequest = (isChatCompletions || isOllamaChat) && requestModelId;
 			if (chatRequest && !response.ok) {
-				void response
-					.clone()
-					.text()
-					.then((text) => learnEffortsFromText(text, requestModelId, requestEffort))
-					.catch(() => {});
-			} else if (chatRequest && requestEffort && response.ok) {
-				// Passive learning: some backends answer 200 and put the template error
-				// inside the (streamed) body — scan the clone without touching the response.
-				void response
-					.clone()
-					.text()
+				void responseExcerpt(response, 8192)
 					.then((text) => {
-						if (/reasoning effort|supported types/i.test(text)) {
+						console.error(`[Reasoning Effort Selector] Chat request failed: HTTP ${response.status}; model=${requestModelId}; effort=${requestEffort ?? 'Default'}; response=${text.slice(0, 1000)}`);
+						learnEffortsFromText(text, requestModelId, requestEffort);
+					})
+					.catch((error) => reportError('Unable to inspect the failed chat response', error));
+			} else if (chatRequest && requestEffort && response.ok) {
+				void responseExcerpt(response, 65536)
+					.then((text) => {
+						if (/reasoning effort|supported types|invalid.{0,30}think|think must be|output_config\.effort/i.test(text)) {
+							console.error(`[Reasoning Effort Selector] Provider reported a reasoning error in an HTTP 200 response: model=${requestModelId}; effort=${requestEffort}; response=${text.slice(0, 1000)}`);
 							return learnEffortsFromText(text, requestModelId, requestEffort);
 						}
 					})
-					.catch(() => {});
+					.catch((error) => reportError('Unable to inspect the chat response', error));
 			}
 			if (
 				url.origin === window.location.origin &&
@@ -1481,7 +1700,7 @@
 					.clone()
 					.json()
 					.then(rememberModels)
-					.catch(() => {});
+				.catch((error) => reportError('Unable to read the model list response', error));
 			}
 			return response;
 		};
@@ -1506,9 +1725,10 @@
 				},
 				credentials: 'include'
 			});
-			if (response.ok) rememberModels(await response.json());
-		} catch {
-			// The app's own model refreshes can populate this later.
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			rememberModels(await response.json());
+		} catch (error) {
+			reportError('Unable to load the model list', error);
 		}
 	};
 
@@ -1527,17 +1747,28 @@
 		injectStyles();
 		installFetchHook();
 		lastModelsAttempt = Date.now();
-		window.addEventListener('storage', queueRender);
+		window.addEventListener('storage', (event) => {
+			if (!event.key || event.key === STORAGE_KEY) state.selections = null;
+			if (!event.key || event.key === LEARNED_STORAGE_KEY) state.learnedEfforts = null;
+			queueRender();
+		});
 		setTimeout(loadModels, 250);
 	};
 
 	const start = () => {
-		new MutationObserver(() => {
+		const anchorSelector = '#input-menu-button,#sidebar-toggle-button,button[id^="model-selector-"][id$="-button"]';
+		const containsAnchor = (node) => node?.nodeType === 1 &&
+			(node.matches?.(anchorSelector) || node.querySelector?.(anchorSelector));
+		new MutationObserver((records) => {
 			if (!armed) {
 				if (!looksLikeOpenWebUI()) return;
 				arm();
 			}
-			queueRender();
+			if (records.some((record) => {
+				const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+				return target?.closest?.(anchorSelector) ||
+					[...record.addedNodes, ...record.removedNodes].some(containsAnchor);
+			})) queueRender();
 		}).observe(document.documentElement, {
 			childList: true,
 			subtree: true,
