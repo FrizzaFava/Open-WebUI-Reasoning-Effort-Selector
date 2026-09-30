@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Open WebUI — Reasoning Effort selector (v2)
 // @namespace    https://github.com/FrizzaFava/Open-WebUI-Reasoning-Effort-Selector
-// @version      2.6.1
+// @version      2.6.2
 // @description  Per-model reasoning effort selector for Open WebUI with custom levels and registry-defined provider request mappings.
 // @author       FrizzaFava (original from CryptoSharon)
 // @match        *://*/*
@@ -418,6 +418,21 @@
 		return null;
 	};
 
+	const modelLineageFor = (model) => {
+		const lineage = [];
+		const seen = new Set();
+		while (model && !seen.has(model.id)) {
+			lineage.push(model);
+			seen.add(model.id);
+			const baseId = model.info?.base_model_id ?? model.base_model_id;
+			if (typeof baseId !== 'string' || !baseId.trim()) break;
+			model = state.models.get(baseId) ?? { id: baseId };
+		}
+		return lineage;
+	};
+	const connectionModelFor = (model) => Object.assign({}, ...modelLineageFor(model));
+	const ollamaInfoFor = (model) => modelLineageFor(model)
+		.map((item) => state.ollamaInfo.get(item.id)).find(Boolean);
 	const connectionMatches = (connection, model) => {
 		if (!connection || typeof connection !== 'object') return false;
 		const type = String(model.owned_by ?? '').toLowerCase();
@@ -435,10 +450,16 @@
 	const registryResolutionFor = (model) => {
 		if (!state.registry || !model || typeof model !== 'object') return null;
 		if (state.registryRules.has(model)) return state.registryRules.get(model);
-		const modelRule = state.registry.models[model.id];
-		const explicit = typeof modelRule?.provider === 'string' ? modelRule.provider : null;
+		const lineage = modelLineageFor(model);
+		const modelRules = lineage.map((item) => state.registry.models[item.id]).filter(Boolean).reverse();
+		const modelObject = modelRules.reduce((combined, rule) => {
+			const value = Array.isArray(rule) ? { thinking: true, levels: true, efforts: rule } : rule;
+			return { ...combined, ...value, mappings: { ...combined.mappings, ...value.mappings } };
+		}, {});
+		const explicit = typeof modelObject.provider === 'string' ? modelObject.provider : null;
+		const connectionModel = connectionModelFor(model);
 		const connectionProfiles = Object.entries(state.registry.providers).filter(([, rule]) =>
-			connectionMatches(rule?.connection, model));
+			connectionMatches(rule?.connection, connectionModel));
 		let connectionProvider = null;
 		if (connectionProfiles.length === 1) connectionProvider = connectionProfiles[0][0];
 		if (connectionProfiles.length > 1 && !state.ambiguousProviders.has(model.id)) {
@@ -446,24 +467,23 @@
 			reportError(`Several provider profiles match connection for ${model.id}; use an exact model entry`,
 				new Error(connectionProfiles.map(([id]) => id).join(', ')));
 		}
-		const hinted = [model.provider, model.openai?.provider, model.info?.meta?.provider,
-			String(model.owned_by ?? '').toLowerCase() === 'ollama' ? 'ollama' : null];
+		const hinted = lineage.flatMap((item) => [item.provider, item.openai?.provider, item.info?.meta?.provider]);
+		if (String(connectionModel.owned_by ?? '').toLowerCase() === 'ollama') hinted.push('ollama');
 		const providerId = explicit ?? (connectionProfiles.length > 1 ? null :
 			connectionProvider ?? hinted.find((name) => typeof name === 'string' &&
 				Object.hasOwn(state.registry.providers, name)));
 		const profile = providerId ? state.registry.providers[providerId] : null;
-		if (!profile && !modelRule) {
+		if (!profile && !modelRules.length) {
 			state.registryRules.set(model, null);
 			return null;
 		}
-		const modelObject = Array.isArray(modelRule) ? { thinking: true, levels: true, efforts: modelRule } : modelRule ?? {};
 		const combined = { ...(profile ?? {}), ...modelObject,
 			mappings: { ...(profile?.mappings ?? {}), ...(modelObject.mappings ?? {}) } };
 		const entry = normalizedEntry(combined);
 		const modelEfforts = normalizedEntry(modelObject)?.efforts ?? [];
-		const resolution = { entry, modelConfigured: Boolean(modelRule), providerConfigured: Boolean(profile), providerId,
+		const resolution = { entry, modelConfigured: modelRules.length > 0, providerConfigured: Boolean(profile), providerId,
 			requestConfigured: Boolean(entry?.parameter || Object.keys(entry?.mappings ?? {}).length),
-			levelsConfigured: Boolean(modelRule) && (modelObject.levels === false || modelEfforts.length > 0),
+			levelsConfigured: modelRules.length > 0 && (modelObject.levels === false || modelEfforts.length > 0),
 			levelsSpecified: Object.hasOwn(combined, 'levels') };
 		state.registryRules.set(model, resolution);
 		return resolution;
@@ -588,10 +608,11 @@
 	// capability flag. Unsupported named selections round DOWN to the nearest
 	// supported level; Ollama would otherwise silently use the model default.
 	const ensureOllamaInfo = (model) => {
+		model = model ? connectionModelFor(model) : null;
 		if (!model || String(model.owned_by ?? '').toLowerCase() !== 'ollama') return;
 		if (state.ollamaInfo.has(model.id) || state.ollamaInfoTried.has(model.id)) return;
 		state.ollamaInfoTried.add(model.id);
-		const showModel = model.info?.base_model_id ?? model.base_model_id ?? model.id;
+		const showModel = model.id;
 		originalFetch('/ollama/api/show', {
 			method: 'POST',
 			headers: {
@@ -621,7 +642,7 @@
 	};
 
 	const ollamaThinkFor = (effort, model) => {
-		const info = model ? state.ollamaInfo.get(model.id) : null;
+		const info = model ? ollamaInfoFor(model) : null;
 		if (info && !info.canThink) return null; // model cannot think: strip any override
 		if (!effort) return null; // Default → leave the model default in place
 		if (effort === 'off') return false;
@@ -688,12 +709,12 @@
 		hasVerifiedList: false
 	};
 
-	const inferredInfoForModel = (model) => {
+	const directInfoForModel = (model) => {
 		if (!model) return null;
 
 		// Ollama auto-detection via /ollama/api/show.
-		if (String(model.owned_by ?? '').toLowerCase() === 'ollama') {
-			const info = state.ollamaInfo.get(model.id);
+		if (String(connectionModelFor(model).owned_by ?? '').toLowerCase() === 'ollama') {
+			const info = ollamaInfoFor(model);
 			if (info) {
 				if (!info.canThink) {
 					return { show: false, mode: 'none', verified: [], efforts: [], hasVerifiedList: true };
@@ -743,6 +764,13 @@
 		const publicDbEfforts = publicDbEffortsFor(model);
 		if (publicDbEfforts) return verifiedInfo(publicDbEfforts);
 
+		return null;
+	};
+	const inferredInfoForModel = (model) => {
+		for (const item of modelLineageFor(model)) {
+			const info = directInfoForModel(item);
+			if (info) return info;
+		}
 		return UNKNOWN_INFO;
 	};
 
@@ -1571,7 +1599,7 @@
 	};
 	const applySelectionToBody = (body, model, effort, isOllamaChat) => {
 		if (!effort) return false;
-		const isOllama = isOllamaChat || String(model?.owned_by ?? '').toLowerCase() === 'ollama';
+		const isOllama = isOllamaChat || String(connectionModelFor(model).owned_by ?? '').toLowerCase() === 'ollama';
 		const entry = registryEntryFor(model);
 		const mapping = entry?.mappings?.[effort] ?? parameterMapping(entry, effort);
 		if (mapping) {
