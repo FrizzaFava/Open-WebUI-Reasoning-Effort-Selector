@@ -8,6 +8,8 @@ A per-model reasoning effort selector for [Open WebUI](https://github.com/open-w
 
 > **TL;DR:** Follow [Installation](#installation), check the [full configuration example](#full-configuration-example), then check the [major provider parameter list](#major-provider-reasoning-parameters) for the request field your connection expects.
 
+## UPDATE: since the v0.12.0 of Open WebUI, they FINALLY added a native control, you can customize more parameters and have a more comprehensive graphical per-model configuration. [CHANGELOG](https://github.com/open-webui/open-webui/releases/tag/v0.12.0)
+
 ## Contents
 
 - [Reasoning Effort Selector for Open WebUI](#reasoning-effort-selector-for-open-webui)
