@@ -35,7 +35,7 @@ A per-model reasoning effort selector for [Open WebUI](https://github.com/open-w
 
 The widget offers discrete levels such as None, Low, Medium, and High, or an On/Off switch for a model with boolean thinking. It stores the selection per model in the browser. **Default** clears the widget's override and leaves Open WebUI's existing request settings alone.
 
-For predictable behavior across providers, also install [`main.py`](main.py) and configure its two JSON Valves: **providers** defines shared request rules; **models** defines exact model capabilities and exceptions. The [full example](#full-configuration-example) shows how they work together.
+For predictable behavior across providers, also install [`main.py`](main.old.py) and configure its two JSON Valves: **providers** defines shared request rules; **models** defines exact model capabilities and exceptions. The [full example](#full-configuration-example) shows how they work together.
 
 ## How it works
 
@@ -65,7 +65,7 @@ The two installation methods can coexist; the script prevents duplicate initiali
 
 ### Registry function
 
-1. In Open WebUI, open **Admin Panel → Functions → Create a Function** and paste [`main.py`](main.py).
+1. In Open WebUI, open **Admin Panel → Functions → Create a Function** and paste [`main.py`](main.old.py).
 2. Give it an ID containing `re-registry`, such as `re_registry`. Save and activate it.
 3. Open its **Valves** and paste a complete JSON object into each of **providers** and **models**. Use `{}` for an intentionally empty Valve; see the [full configuration example](#full-configuration-example) for both objects.
 4. Reload Open WebUI after changing the Valves. The function appears in the model list for the script's registry lookup; do not select it as a chat model.
