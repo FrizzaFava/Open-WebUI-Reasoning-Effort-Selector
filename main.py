@@ -2,7 +2,7 @@
 title: Native RE Slider Skin
 author: FrizzaFava
 author_url: https://github.com/FrizzaFava
-version: 3.0.4
+version: 3.0.6
 license: MIT
 required_open_webui_version: 0.12.0
 description: Styles Open WebUI's native model controls without changing their options, saved choices, or provider requests.
@@ -24,30 +24,20 @@ def asset_compose(app, path):
 
     target = Path(STATIC_DIR) / path.rsplit("/", 1)[-1]
     try:
-        body = (
-            target.read_text(encoding="utf-8")
-            if target.is_file() and not target.is_symlink()
-            else ""
-        )
+        body = target.read_text(encoding="utf-8") if target.is_file() and not target.is_symlink() else ""
     except OSError:
         body = ""
     fragments = getattr(app.state, "_owui_static_fragments", {}).get(path, {})
-    ordered = sorted(
-        fragments.items(), key=lambda item: (int(item[1].get("order", 0)), item[0])
-    )
+    ordered = sorted(fragments.items(), key=lambda item: (int(item[1].get("order", 0)), item[0]))
     for _, entry in ordered:
-        pattern = (
-            re.escape(entry["start"]) + r".*?(?:" + re.escape(entry["end"]) + r"\n?|$)"
-        )
+        pattern = re.escape(entry["start"]) + r".*?(?:" + re.escape(entry["end"]) + r"\n?|$)"
         body = re.sub(pattern, "", body, flags=re.DOTALL)
     parts = [body.rstrip()]
     for key, entry in ordered:
         try:
             parts.append((entry["js"]() or "").strip())
         except Exception:
-            logging.getLogger(__name__).exception(
-                "Could not load asset fragment %s", key
-            )
+            logging.getLogger(__name__).exception("Could not load asset fragment %s", key)
     result = "\n\n".join(part for part in parts if part)
     return result + "\n" if result else ""
 
@@ -60,12 +50,7 @@ def asset_register(app, path, key, start, end, producer, order=0):
     if registry is None:
         registry = {}
         app.state._owui_static_fragments = registry
-    registry.setdefault(path, {})[key] = {
-        "start": start,
-        "end": end,
-        "js": producer,
-        "order": order,
-    }
+    registry.setdefault(path, {})[key] = {"start": start, "end": end, "js": producer, "order": order}
     if any(getattr(route, "_owui_shared_asset", None) == path for route in app.routes):
         return
 
@@ -79,31 +64,16 @@ def asset_register(app, path, key, start, end, producer, order=0):
         return Response(body, media_type=media_type, headers=headers)
 
     route = Route(path, serve, methods=["GET"])
-    # Existing asset plugins can share the same registry and route.
     route._owui_shared_asset = path
-    app.routes[:] = [
-        existing for existing in app.routes if getattr(existing, "path", None) != path
-    ]
-    position = next(
-        (
-            index
-            for index, existing in enumerate(app.routes)
-            if isinstance(existing, Mount) and existing.name == "static"
-        ),
-        len(app.routes),
-    )
+    app.routes[:] = [existing for existing in app.routes if getattr(existing, "path", None) != path]
+    position = next((index for index, existing in enumerate(app.routes) if isinstance(existing, Mount) and existing.name == "static"), len(app.routes))
     app.routes.insert(position, route)
 
 
 ASSET_KEY = "frizzafava-native-reasoning-skin"
 _module_name = __name__.removeprefix("function_")
 _function_name, _, _module_nonce = _module_name.rpartition("_")
-FUNCTION_ID = (
-    _function_name
-    if len(_module_nonce) == 32
-    and all(char in "0123456789abcdef" for char in _module_nonce)
-    else _module_name
-)
+FUNCTION_ID = _function_name if len(_module_nonce) == 32 and all(char in "0123456789abcdef" for char in _module_nonce) else _module_name
 JS_START = "// frizzafava-native-reasoning-skin:start"
 JS_END = "// frizzafava-native-reasoning-skin:end"
 CSS_START = "/* frizzafava-native-reasoning-skin:start */"
@@ -129,7 +99,8 @@ CSS = r"""
 [data-re-native-trigger]:hover { background: rgba(0,0,0,.05); }
 .dark [data-re-native-trigger] { color: #d1d5db; border-color: rgba(75,85,99,.5); }
 .dark [data-re-native-trigger]:hover { background: rgba(255,255,255,.07); }
-[data-re-native-trigger][data-re-native-open] {
+[data-re-native-trigger][data-re-native-open],
+[data-re-native-trigger][data-re-native-active] {
   color: #3a83f7 !important; border-color: rgba(58,131,247,.45);
   background: rgba(58,131,247,.08);
 }
@@ -259,6 +230,51 @@ SCRIPT = r"""
   const dragging = new Set();
   let pending = null;
   let frame = 0;
+  let accountToken = '';
+  let models = null;
+  let choices = {};
+  let refreshNeeded = true;
+  let reading = false;
+  const updateIndicator = () => {
+    let token, selected;
+    try {
+      token = localStorage.getItem('token');
+      try { selected = JSON.parse(sessionStorage.getItem('selectedModels') || '[]'); } catch { selected = []; }
+      if (!Array.isArray(selected)) selected = [];
+      const findModels = label => (models || []).filter(model => [model.name ?? model.info?.name ?? model.id, ...Object.values((model.info?.meta ?? model.meta)?.i18n || {}).map(locale => locale?.name)].includes(label));
+      const label = document.querySelector('#message-input-container [id="model-selector-model-button"] .truncate')?.textContent.trim();
+      if (label) {
+        const matches = findModels(label);
+        const comparison = label.match(/^(.*) \+(\d+)$/);
+        if (matches.length === 1) selected = [matches[0].id];
+        else if (!comparison || selected.length !== Number(comparison[2]) + 1 || !findModels(comparison[1]).some(model => model.id === selected[0])) selected = [];
+      }
+      const mention = document.querySelector('#message-input-container img[src*="/models/model/profile/image?"]');
+      if (mention) selected = [new URL(mention.src).searchParams.get('id')];
+    } catch { return; }
+    if (!token || !Array.isArray(selected)) return;
+    if (token !== accountToken) {
+      accountToken = token; models = null; choices = {}; refreshNeeded = true;
+    }
+    const active = selected.some(id => Object.entries(models?.find(model => model.id === id)?.info?.params?.model_controls || {}).some(([key, control]) => {
+      const value = choices[id]?.[key];
+      return !!value && Object.hasOwn(control.options || {}, value) && value !== control.default;
+    }));
+    for (const button of document.querySelectorAll('[data-re-native-trigger]')) mark(button, 'data-re-native-active', active);
+    if (!refreshNeeded || reading || document.querySelector('[data-re-native-panel] input:disabled, [data-re-native-panel] button[role="menuitemradio"]:disabled')) return;
+    reading = true; refreshNeeded = false;
+    const read = async path => {
+      const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error('Could not read native model controls');
+      return response.json();
+    };
+    Promise.all([read('/api/v1/users/user/settings'), models ? Promise.resolve({ data: models }) : read('/api/models')]).then(([settings, catalogue]) => {
+      if (token !== accountToken || refreshNeeded) return;
+      models = catalogue.data || [];
+      choices = settings.ui?.params?.model_controls || {};
+      schedule();
+    }).catch(() => {}).finally(() => { reading = false; if (refreshNeeded) schedule(); });
+  };
   const decorateComposer = composer => {
     for (const button of composer.querySelectorAll('button[aria-label]')) {
       if (![...button.querySelectorAll('svg path')].some(path => normalize(path.getAttribute('d') || '') === normalize(knobsPath))) continue;
@@ -269,7 +285,6 @@ SCRIPT = r"""
     }
   };
   const decoratePanel = panel => {
-    // Inline importance overrides native utilities without changing global layer order.
     panel.style.setProperty('border-radius', '16px', 'important');
     panel.style.setProperty('padding', '6px', 'important');
     for (const button of panel.querySelectorAll('button[role="menuitemradio"]')) {
@@ -315,7 +330,7 @@ SCRIPT = r"""
       if (!inputs.has(input)) {
         inputs.add(input);
         input.addEventListener('input', schedule);
-        input.addEventListener('change', schedule);
+        input.addEventListener('change', () => { refreshNeeded = true; schedule(); });
         input.addEventListener('pointerdown', () => {
           if (!input.disabled) { mark(track, 'data-re-native-dragging'); dragging.add(track); }
         });
@@ -352,10 +367,12 @@ SCRIPT = r"""
       if (!panel.isConnected) panels.delete(panel);
       else decoratePanel(panel);
     }
+    updateIndicator();
   };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(flush); };
   const trackOpen = event => {
     if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+    if (event.type === 'click' && event.target instanceof Element && event.target.closest('[data-re-native-panel] button')) { refreshNeeded = true; schedule(); }
     const button = event.target instanceof Element ? event.target.closest('[data-re-native-trigger]') : null;
     if (!button) return;
     const wrapper = button.closest('[role="button"][aria-haspopup="true"]');
@@ -363,6 +380,7 @@ SCRIPT = r"""
       ? { wrapper, menus: new Set(document.querySelectorAll('body > [role="menu"]')), until: performance.now() + 1000 }
       : null;
     roots.add(button.closest(composerSelector));
+    if (pending) refreshNeeded = true;
     schedule();
   };
   const start = () => {
@@ -394,7 +412,7 @@ SCRIPT = r"""
         }
       }
       if (relevant) schedule();
-    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'aria-valuetext', 'disabled', 'min', 'max', 'value', 'style'] });
+    }).observe(document.body, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'aria-valuetext', 'disabled', 'min', 'max', 'value', 'style', 'src'] });
   };
   if (document.body) start();
   else document.addEventListener('DOMContentLoaded', start, { once: true });
@@ -411,31 +429,15 @@ class Event:
         self._disabled = False
         self._bootstrap_task = None
         try:
-            self._bootstrap_task = asyncio.get_running_loop().create_task(
-                self._bootstrap()
-            )
+            self._bootstrap_task = asyncio.get_running_loop().create_task(self._bootstrap())
         except RuntimeError:
             pass
 
     def _register(self, app):
         self._active = True
         self._disabled = False
-        asset_register(
-            app,
-            LOADER_PATH,
-            ASSET_KEY,
-            JS_START,
-            JS_END,
-            lambda: JS_FRAGMENT if self._active else "",
-        )
-        asset_register(
-            app,
-            CUSTOM_CSS_PATH,
-            ASSET_KEY,
-            CSS_START,
-            CSS_END,
-            lambda: CSS_FRAGMENT if self._active else "",
-        )
+        asset_register(app, LOADER_PATH, ASSET_KEY, JS_START, JS_END, lambda: JS_FRAGMENT if self._active else "")
+        asset_register(app, CUSTOM_CSS_PATH, ASSET_KEY, CSS_START, CSS_END, lambda: CSS_FRAGMENT if self._active else "")
 
     async def _bootstrap(self):
         try:
@@ -448,32 +450,15 @@ class Event:
         except Exception:
             log.exception("Could not initialize native model control styling")
 
-    async def event(
-        self,
-        event: dict | None = None,
-        __event_name__: str = "",
-        __app__: Any = None,
-        __id__: str = "",
-        **kwargs,
-    ):
+    async def event(self, event: dict | None = None, __event_name__: str = "", __app__: Any = None, __id__: str = "", **kwargs):
         if __app__ is None:
             return
         own = ((event or {}).get("subject") or {}).get("id") == (__id__ or FUNCTION_ID)
-        if own and __event_name__ in {
-            "function.disable_started",
-            "function.disabled",
-            "function.deleted",
-        }:
+        if own and __event_name__ in {"function.disable_started", "function.disabled", "function.deleted"}:
             self._active = False
             self._disabled = True
             return
-        if own and __event_name__ in {
-            "function.enable_started",
-            "function.enabled",
-            "function.updated",
-        }:
+        if own and __event_name__ in {"function.enable_started", "function.enabled", "function.updated"}:
             self._register(__app__)
-        elif not self._disabled and (
-            __event_name__ == "system.startup.completed" or not self._active
-        ):
+        elif not self._disabled and (__event_name__ == "system.startup.completed" or not self._active):
             self._register(__app__)
